@@ -4,6 +4,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import mongoose from "mongoose";
+
 import authRoutes from "./routes/auth.js";
 import recordRoutes from "./routes/records.js";
 
@@ -11,21 +12,20 @@ import recordRoutes from "./routes/records.js";
 dns.setServers(["8.8.8.8", "8.8.4.4"]);
 
 const app = express();
+
 const PORT = process.env.PORT || 5000;
 const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
+const MONGODB_URI = process.env.MONGODB_URI;
+const JWT_SECRET = process.env.JWT_SECRET;
 
-if (!process.env.MONGODB_URI) {
-  console.error(
-    "MONGODB_URI is missing. Copy server/.env.example to server/.env and add your Atlas URI."
-  );
-  process.exit(1);
+if (!MONGODB_URI) {
+  throw new Error("MONGODB_URI environment variable is missing.");
 }
 
-if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
-  console.error(
-    "JWT_SECRET must be set to a random string at least 32 characters long."
+if (!JWT_SECRET || JWT_SECRET.length < 32) {
+  throw new Error(
+    "JWT_SECRET must be at least 32 characters long."
   );
-  process.exit(1);
 }
 
 app.use(
@@ -37,13 +37,53 @@ app.use(
 
 app.use(express.json({ limit: "1mb" }));
 
-app.get("/api/health", (_req, res) =>
+// Reuse the MongoDB connection across requests
+let connectionPromise = null;
+
+async function connectToDatabase() {
+  if (mongoose.connection.readyState === 1) {
+    return;
+  }
+
+  if (!connectionPromise) {
+    connectionPromise = mongoose
+      .connect(MONGODB_URI)
+      .then(() => {
+        console.log("Connected to MongoDB Atlas.");
+        connectionPromise = null;
+      })
+      .catch(error => {
+        connectionPromise = null;
+        throw error;
+      });
+  }
+
+  await connectionPromise;
+}
+
+// Ensure the database is connected before processing API requests
+app.use(async (_req, res, next) => {
+  try {
+    await connectToDatabase();
+    next();
+  } catch (error) {
+    console.error("MongoDB connection failed:", error.message);
+
+    res.status(503).json({
+      message: "Database connection unavailable. Please try again."
+    });
+  }
+});
+
+app.get("/api/health", (_req, res) => {
   res.json({
     status: "ok",
     database:
-      mongoose.connection.readyState === 1 ? "connected" : "disconnected"
-  })
-);
+      mongoose.connection.readyState === 1
+        ? "connected"
+        : "disconnected"
+  });
+});
 
 app.use("/api/auth", authRoutes);
 app.use("/api", recordRoutes);
@@ -62,16 +102,12 @@ app.use((err, _req, res, _next) => {
   });
 });
 
-mongoose
-  .connect(process.env.MONGODB_URI)
-  .then(() => {
-    console.log("Connected to MongoDB Atlas.");
+// Export Express app for Vercel
+export default app;
 
-    app.listen(PORT, () => {
-      console.log(`SpendWise API running at http://localhost:${PORT}`);
-    });
-  })
-  .catch(error => {
-    console.error("MongoDB connection failed:", error.message);
-    process.exit(1);
+// Start a regular server during local development
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`SpendWise API running at http://localhost:${PORT}`);
   });
+}
